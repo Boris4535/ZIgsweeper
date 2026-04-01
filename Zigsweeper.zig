@@ -23,7 +23,7 @@ const Game = struct {
 
     pub fn init(allocator: std.mem.Allocator, w: u32, h: u32) !Game {
         const cells = try allocator.alloc(Cell, w * h);
-        @memset(cells, .{});
+        @memset(cells, Cell{});
         return .{
             .width = w,
             .height = h,
@@ -41,15 +41,15 @@ const Game = struct {
     }
 
     fn placeMines(self: *Game, safe_x: u32, safe_y: u32) void {
-        var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+        var prng = std.Random.DefaultPrng.init(@as(u64, @bitCast(std.time.milliTimestamp())));
         const random = prng.random();
         const total_cells = self.width * self.height;
         const mine_count = total_cells / 8;
-
         var placed: u32 = 0;
+
         while (placed < mine_count) {
-            const rx = random.uintLessThan(u32, self.width);
-            const ry = random.uintLessThan(u32, self.height);
+            const rx = random.intRangeLessThan(u32, 0, self.width);
+            const ry = random.intRangeLessThan(u32, 0, self.height);
 
             if ((rx == safe_x and ry == safe_y) or self.cells[self.getIndex(rx, ry)].mine) {
                 continue;
@@ -62,20 +62,23 @@ const Game = struct {
         for (0..self.height) |y| {
             for (0..self.width) |x| {
                 if (self.cells[self.getIndex(@intCast(x), @intCast(y))].mine) continue;
-                self.cells[self.getIndex(@intCast(x), @intCast(y))].neighbor_mines = self.countMines(@intCast(x), @intCast(y));
+                self.cells[self.getIndex(@intCast(x), @intCast(y))].neighbor_mines =
+                    self.countMines(@as(i32, @intCast(x)), @as(i32, @intCast(y)));
             }
         }
     }
 
     fn countMines(self: Game, x: i32, y: i32) u4 {
         var count: u4 = 0;
+        const w = @as(i32, @intCast(self.width));
+        const h = @as(i32, @intCast(self.height));
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
             var dx: i32 = -1;
             while (dx <= 1) : (dx += 1) {
                 const nx = x + dx;
                 const ny = y + dy;
-                if (nx >= 0 and nx < self.width and ny >= 0 and ny < self.height) {
+                if (nx >= 0 and nx < w and ny >= 0 and ny < h) {
                     if (self.cells[self.getIndex(@intCast(nx), @intCast(ny))].mine) count += 1;
                 }
             }
@@ -94,20 +97,21 @@ const Game = struct {
         }
 
         self.cells[idx].revealed = true;
-
         if (self.cells[idx].mine) {
             self.state = .lost;
             return;
         }
 
         if (self.cells[idx].neighbor_mines == 0) {
+            const w = @as(i32, @intCast(self.width));
+            const h = @as(i32, @intCast(self.height));
             var dy: i32 = -1;
             while (dy <= 1) : (dy += 1) {
                 var dx: i32 = -1;
                 while (dx <= 1) : (dx += 1) {
                     const nx = @as(i32, @intCast(x)) + dx;
                     const ny = @as(i32, @intCast(y)) + dy;
-                    if (nx >= 0 and nx < self.width and ny >= 0 and ny < self.height) {
+                    if (nx >= 0 and nx < w and ny >= 0 and ny < h) {
                         self.reveal(@intCast(nx), @intCast(ny));
                     }
                 }
@@ -124,26 +128,22 @@ const Game = struct {
     }
 };
 
-//Qui ci sono i comandi
 const Term = struct {
     orig_termios: posix.termios,
 
     pub fn init() !Term {
-        const stdin_fd = std.io.getStdIn().handle;
-        const orig = try posix.tcgetattr(stdin_fd);
+        const orig = try posix.tcgetattr(posix.STDIN_FILENO);
         var raw = orig;
         raw.lflag.ECHO = false;
         raw.lflag.ICANON = false;
-        try posix.tcsetattr(stdin_fd, .FLUSH, raw);
-
-        _ = try std.io.getStdOut().write("\x1b[?1049h\x1b[?25l");
+        try posix.tcsetattr(posix.STDIN_FILENO, posix.TCSA.FLUSH, raw);
+        _ = try posix.write(posix.STDOUT_FILENO, "\x1b[?1049h\x1b[?25l");
         return .{ .orig_termios = orig };
     }
 
     pub fn deinit(self: Term) void {
-        const stdin_fd = std.io.getStdIn().handle;
-        posix.tcsetattr(stdin_fd, .FLUSH, self.orig_termios) catch {};
-        _ = std.io.getStdOut().write("\x1b[?1049l\x1b[?25h") catch {};
+        posix.tcsetattr(posix.STDIN_FILENO, posix.TCSA.FLUSH, self.orig_termios) catch {};
+        _ = posix.write(posix.STDOUT_FILENO, "\x1b[?1049l\x1b[?25h") catch {};
     }
 };
 
@@ -158,9 +158,10 @@ pub fn main() !void {
     var game = try Game.init(allocator, 20, 10);
     defer game.deinit();
 
-    const stdout = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout);
-    const w = bw.writer();
+    // Zig 0.15 writer API: supply an explicit backing buffer
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    const w = &stdout_writer.interface;
 
     while (game.state == .playing) {
         try w.print("\x1b[2J\x1b[H", .{});
@@ -171,31 +172,35 @@ pub fn main() !void {
                 const is_cursor = (x == game.cursor_x and y == game.cursor_y);
                 const cell = game.cells[game.getIndex(@intCast(x), @intCast(y))];
 
-                if (is_cursor) try w.print("\x1b[7m", .{}); // Invert colors for cursor
+                if (is_cursor) try w.writeAll("\x1b[7m");
 
                 if (cell.revealed) {
                     if (cell.mine) {
-                        try w.print("* ", .{});
+                        try w.writeAll("* ");
                     } else if (cell.neighbor_mines == 0) {
-                        try w.print(". ", .{});
+                        try w.writeAll(". ");
                     } else {
                         try w.print("{d} ", .{cell.neighbor_mines});
                     }
                 } else if (cell.flagged) {
-                    try w.print("F ", .{});
+                    try w.writeAll("F ");
                 } else {
-                    try w.print("? ", .{});
+                    try w.writeAll("? ");
                 }
 
-                if (is_cursor) try w.print("\x1b[0m", .{});
+                if (is_cursor) try w.writeAll("\x1b[0m");
             }
-            try w.print("\n", .{});
+            try w.writeAll("\n");
         }
-        try bw.flush();
+        try w.flush();
 
-        var buf: [1]u8 = undefined;
-        _ = try std.io.getStdIn().read(&buf);
-        switch (buf[0]) {
+        // Use posix.read directly for raw single-byte terminal input —
+        // cleaner than fighting the new std.Io.Reader API for a 1-byte read.
+        var key_buf: [1]u8 = undefined;
+        const bytes_read = try posix.read(posix.STDIN_FILENO, &key_buf);
+        if (bytes_read == 0) continue;
+
+        switch (key_buf[0]) {
             'q' => break,
             'w' => if (game.cursor_y > 0) {
                 game.cursor_y -= 1;
@@ -219,7 +224,7 @@ pub fn main() !void {
     }
 
     try w.print("\x1b[2J\x1b[H", .{});
-    if (game.state == .won) try w.print("YOU WON!\n", .{}) else try w.print("BOOM!\n", .{});
-    try bw.flush();
-    std.time.sleep(2 * std.time.ns_per_s);
+    if (game.state == .won) try w.writeAll("YOU WON!\n") else try w.writeAll("BOOM!\n");
+    try w.flush();
+    std.Thread.sleep(2 * std.time.ns_per_s);
 }
