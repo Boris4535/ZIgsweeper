@@ -1,6 +1,46 @@
 const std = @import("std");
 const posix = std.posix;
 
+const Color = struct {
+    pub const Reset = "\x1b[0m";
+    pub const Red = "\x1b[31m";
+    pub const Green = "\x1b[32m";
+    pub const Yellow = "\x1b[33m";
+    pub const Blue = "\x1b[34m";
+    pub const Magenta = "\x1b[35m";
+    pub const Cyan = "\x1b[36m";
+    pub const DarkGray = "\x1b[90m";
+    pub const BrightRed = "\x1b[91m";
+
+    pub fn getNumberColor(n: u4) []const u8 {
+        return switch (n) {
+            1 => Blue,
+            2 => Green,
+            3 => BrightRed,
+            4 => Magenta,
+            5 => Yellow,
+            6 => Cyan,
+            7 => Red,
+            8 => Yellow,
+            else => Reset,
+        };
+    }
+};
+
+const Difficulty = enum {
+    easy,
+    hard,
+    extreme,
+
+    pub fn getParams(self: Difficulty) struct { w: u32, h: u32, mines: u32 } {
+        return switch (self) {
+            .easy => .{ .w = 10, .h = 10, .mines = 10 },
+            .hard => .{ .w = 20, .h = 15, .mines = 40 },
+            .extreme => .{ .w = 30, .h = 16, .mines = 99 },
+        };
+    }
+};
+
 const Cell = packed struct(u8) {
     mine: bool = false,
     revealed: bool = false,
@@ -14,6 +54,7 @@ const GameState = enum { playing, won, lost };
 const Game = struct {
     width: u32,
     height: u32,
+    mine_count: u32,
     cells: []Cell,
     cursor_x: u32 = 0,
     cursor_y: u32 = 0,
@@ -21,12 +62,13 @@ const Game = struct {
     first_move: bool = true,
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, w: u32, h: u32) !Game {
+    pub fn init(allocator: std.mem.Allocator, w: u32, h: u32, mines: u32) !Game {
         const cells = try allocator.alloc(Cell, w * h);
         @memset(cells, Cell{});
         return .{
             .width = w,
             .height = h,
+            .mine_count = mines,
             .cells = cells,
             .allocator = allocator,
         };
@@ -43,11 +85,10 @@ const Game = struct {
     fn placeMines(self: *Game, safe_x: u32, safe_y: u32) void {
         var prng = std.Random.DefaultPrng.init(@as(u64, @bitCast(std.time.milliTimestamp())));
         const random = prng.random();
-        const total_cells = self.width * self.height;
-        const mine_count = total_cells / 8;
+
         var placed: u32 = 0;
 
-        while (placed < mine_count) {
+        while (placed < self.mine_count) {
             const rx = random.intRangeLessThan(u32, 0, self.width);
             const ry = random.intRangeLessThan(u32, 0, self.height);
 
@@ -155,76 +196,112 @@ pub fn main() !void {
     var term = try Term.init();
     defer term.deinit();
 
-    var game = try Game.init(allocator, 20, 10);
-    defer game.deinit();
-
-    // Zig 0.15 writer API: supply an explicit backing buffer
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const w = &stdout_writer.interface;
 
+    try w.print("\x1b[2J\x1b[H", .{});
+    try w.print("{s}=== ZIGSWEEPER ==={s}\n\n", .{ Color.Cyan, Color.Reset });
+    try w.print("Choose mode':\n", .{});
+    try w.print("{s}1.{s} Easy (10x10, 10 mines)\n", .{ Color.Green, Color.Reset });
+    try w.print("{s}2.{s} Hard (20x15, 40 mines)\n", .{ Color.Yellow, Color.Reset });
+    try w.print("{s}3.{s} Extreme (30x16, 99 mines)\n", .{ Color.Red, Color.Reset });
+    try w.print("\nPress 1, 2, 3 or Q to get out.\n", .{});
+    try w.flush();
+
+    var diff: Difficulty = .easy;
+    menu_loop: while (true) {
+        var key_buf: [1]u8 = undefined;
+        const bytes_read = try posix.read(posix.STDIN_FILENO, &key_buf);
+        if (bytes_read == 0) continue;
+        switch (key_buf[0]) {
+            '1' => {
+                diff = .easy;
+                break :menu_loop;
+            },
+            '2' => {
+                diff = .hard;
+                break :menu_loop;
+            },
+            '3' => {
+                diff = .extreme;
+                break :menu_loop;
+            },
+            'q' => return,
+            else => {},
+        }
+    }
+
+    const params = diff.getParams();
+    var game = try Game.init(allocator, params.w, params.h, params.mines);
+    defer game.deinit();
+
     while (game.state == .playing) {
         try w.print("\x1b[2J\x1b[H", .{});
-        try w.print("ZigSweeper - WASD to move, SPACE to reveal, F to flag, Q to quit\n\n", .{});
+        try w.print("ZigSweeper - HJKL: MOVE | SPACEBAR: Uncover | F: Flag | Q: Exit \n\n", .{});
 
         for (0..game.height) |y| {
             for (0..game.width) |x| {
                 const is_cursor = (x == game.cursor_x and y == game.cursor_y);
                 const cell = game.cells[game.getIndex(@intCast(x), @intCast(y))];
 
-                if (is_cursor) try w.writeAll("\x1b[7m");
+                if (is_cursor) try w.writeAll("\x1b[7m"); // Inverti colori per il cursore
 
                 if (cell.revealed) {
                     if (cell.mine) {
-                        try w.writeAll("* ");
+                        try w.print("{s}* {s}", .{ Color.BrightRed, Color.Reset });
                     } else if (cell.neighbor_mines == 0) {
-                        try w.writeAll(". ");
+                        try w.print("{s}. {s}", .{ Color.DarkGray, Color.Reset });
                     } else {
-                        try w.print("{d} ", .{cell.neighbor_mines});
+                        const num_color = Color.getNumberColor(cell.neighbor_mines);
+                        try w.print("{s}{d} {s}", .{ num_color, cell.neighbor_mines, Color.Reset });
                     }
                 } else if (cell.flagged) {
-                    try w.writeAll("F ");
+                    try w.print("{s}F {s}", .{ Color.Yellow, Color.Reset });
                 } else {
                     try w.writeAll("? ");
                 }
 
-                if (is_cursor) try w.writeAll("\x1b[0m");
+                if (is_cursor) try w.writeAll("\x1b[27m"); // Rimuovi inversione
             }
             try w.writeAll("\n");
         }
         try w.flush();
 
-        // Use posix.read directly for raw single-byte terminal input —
-        // cleaner than fighting the new std.Io.Reader API for a 1-byte read.
         var key_buf: [1]u8 = undefined;
         const bytes_read = try posix.read(posix.STDIN_FILENO, &key_buf);
         if (bytes_read == 0) continue;
-
         switch (key_buf[0]) {
             'q' => break,
-            'w' => if (game.cursor_y > 0) {
+            'k' => if (game.cursor_y > 0) {
                 game.cursor_y -= 1;
             },
-            's' => if (game.cursor_y < game.height - 1) {
+            'j' => if (game.cursor_y < game.height - 1) {
                 game.cursor_y += 1;
             },
-            'a' => if (game.cursor_x > 0) {
+            'h' => if (game.cursor_x > 0) {
                 game.cursor_x -= 1;
             },
-            'd' => if (game.cursor_x < game.width - 1) {
+            'l' => if (game.cursor_x < game.width - 1) {
                 game.cursor_x += 1;
             },
             ' ' => game.reveal(game.cursor_x, game.cursor_y),
             'f' => {
                 const idx = game.getIndex(game.cursor_x, game.cursor_y);
-                if (!game.cells[idx].revealed) game.cells[idx].flagged = !game.cells[idx].flagged;
+                if (!game.cells[idx].revealed) {
+                    game.cells[idx].flagged = !game.cells[idx].flagged;
+                }
             },
             else => {},
         }
     }
 
     try w.print("\x1b[2J\x1b[H", .{});
-    if (game.state == .won) try w.writeAll("YOU WON!\n") else try w.writeAll("BOOM!\n");
+    if (game.state == .won) {
+        try w.print("{s}YOU WON!{s}\n", .{ Color.Green, Color.Reset });
+    } else if (game.state == .lost) {
+        try w.print("{s}BOOOOM !{s}\n", .{ Color.BrightRed, Color.Reset });
+    }
     try w.flush();
     std.Thread.sleep(2 * std.time.ns_per_s);
 }
