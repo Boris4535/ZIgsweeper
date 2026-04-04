@@ -1,6 +1,24 @@
-copy and paste this in the terminal forlinux version
-(or download the release)
+Now, there are gonna be the prebuilt binaries in the release section of the repo. (usually)
+So id advise for you people to compile the code yourself.
+But, if one wants to modify the codebase, and run out their own version.
+I strongly, and i say, strongly advise to use the zig build system. (can be done by just installing Zig system wide).
 
-of course, for minesweeper and others... its the fileName.zig
+Here are the following versions, otherwise sound and other things wont play.
 
-zig build-exe Snake.zig -O ReleaseSafe -target x86_64-linux-musl
+*FOR LINUX DISTROS:*
+zig build-exe FileName.zig -lc -target x86_64-linux-musl -O ReleaseFast
+
+*FOR freeBSD*
+zig build-exe FileName.zig -target x86_64-freebsd -O ReleaseFast
+
+
+*FOR macOs* (UNTESTED)
+
+zig build-exe FileName.zig -target x86_64-macos -O ReleaseFast
+zig build-exe FileName.zig -target aarch64-macos -O ReleaseFast
+
+
+for windows?
+sorry ! Gonna have to wait, or send a commit :D
+
+

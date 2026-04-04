@@ -1,47 +1,80 @@
 const std = @import("std");
 const posix = std.posix;
 
+extern var environ: [*:null]?[*:0]u8;
+
 const explosion_wav = @embedFile("SoundGen/explosion.wav");
 const flag_wav = @embedFile("SoundGen/flag.wav");
+
+const AudioPlayer = struct {
+    cmd: [*:0]const u8,
+    args: []const [*:0]const u8,
+};
+
+const players = [_]AudioPlayer{
+    .{ .cmd = "ffplay", .args = &.{ "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet" } },
+    .{ .cmd = "aplay", .args = &.{ "aplay", "-q" } },
+    .{ .cmd = "paplay", .args = &.{"paplay"} },
+    .{ .cmd = "afplay", .args = &.{"afplay"} },
+    .{ .cmd = "mpv", .args = &.{ "mpv", "--no-video", "--really-quiet" } },
+    .{ .cmd = "play", .args = &.{ "play", "-q" } },
+};
+
+var audio_player: ?*const AudioPlayer = null;
+
+fn detectAudioPlayer() void {
+    const paths = [_][]const u8{
+        "/usr/bin/", "/usr/local/bin/", "/bin/", "/usr/sbin/",
+    };
+    for (&players) |*player| {
+        const cmd = std.mem.span(player.cmd);
+        for (paths) |dir| {
+            var buf: [256]u8 = undefined;
+            const full = std.fmt.bufPrintZ(&buf, "{s}{s}", .{ dir, cmd }) catch continue;
+            posix.access(full, posix.F_OK) catch continue;
+            audio_player = player;
+            return;
+        }
+    }
+}
+
+fn playWav(tmp_path: [*:0]const u8) void {
+    const player = audio_player orelse return;
+    const pid = posix.fork() catch return;
+    if (pid == 0) {
+        const pid2 = posix.fork() catch posix.exit(1);
+        if (pid2 == 0) {
+            var argv: [16:null]?[*:0]const u8 = [_:null]?[*:0]const u8{null} ** 16;
+            for (player.args, 0..) |arg, i| argv[i] = arg;
+            argv[player.args.len] = tmp_path;
+            _ = posix.execvpeZ(player.cmd, &argv, environ) catch {};
+            posix.exit(1);
+        }
+        posix.exit(0);
+    }
+    _ = posix.waitpid(pid, 0);
+}
 
 fn playExplosion() void {
     const tmp = "/tmp/MineExplosion.wav";
     const file = std.fs.createFileAbsolute(tmp, .{}) catch return;
-
     file.writeAll(explosion_wav) catch {
         file.close();
         return;
     };
     file.close();
-
-    const pid = posix.fork() catch return;
-    if (pid == 0) {
-        const argv = [_:null]?[*:0]const u8{
-            "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp, null,
-        };
-        _ = posix.execvpeZ("ffplay", &argv, &[_:null]?[*:0]const u8{null}) catch {};
-        posix.exit(1);
-    }
+    playWav(tmp);
 }
 
 fn playFlag() void {
     const tmp = "/tmp/MineFlag.wav";
     const file = std.fs.createFileAbsolute(tmp, .{}) catch return;
-
     file.writeAll(flag_wav) catch {
         file.close();
         return;
     };
     file.close();
-
-    const pid = posix.fork() catch return;
-    if (pid == 0) {
-        const argv = [_:null]?[*:0]const u8{
-            "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp, null,
-        };
-        _ = posix.execvpeZ("ffplay", &argv, &[_:null]?[*:0]const u8{null}) catch {};
-        posix.exit(1);
-    }
+    playWav(tmp);
 }
 
 const Color = struct {
@@ -232,6 +265,8 @@ const Term = struct {
 };
 
 pub fn main() !void {
+    detectAudioPlayer();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();

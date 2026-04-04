@@ -1,0 +1,5 @@
+Hi, if you happen to not be too much tech savy, and just wanna play a game.
+
+Your mac version is x86 if its of the older generations with INTEL processors.
+
+if your processor starts with an A (hi neo users !) or with an M, then its aarch, and thou have an ARM processor

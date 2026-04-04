@@ -1,7 +1,65 @@
 const std = @import("std");
 const posix = std.posix;
 
+extern var environ: [*:null]?[*:0]u8;
+
 const beep_wav = @embedFile("SoundGen/eat.wav");
+
+// Each entry: { command, args... } — must be null-sentinel terminated
+const AudioPlayer = struct {
+    cmd: [*:0]const u8,
+    args: []const [*:0]const u8,
+};
+
+const players = [_]AudioPlayer{
+    .{ .cmd = "ffplay", .args = &.{ "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet" } },
+    .{ .cmd = "aplay", .args = &.{ "aplay", "-q" } },
+    .{ .cmd = "paplay", .args = &.{"paplay"} },
+    .{ .cmd = "afplay", .args = &.{"afplay"} }, // macOS
+    .{ .cmd = "mpv", .args = &.{ "mpv", "--no-video", "--really-quiet" } },
+    .{ .cmd = "sox", .args = &.{ "play", "-q" } },
+};
+
+// Detected at startup, null = no player found
+var audio_player: ?*const AudioPlayer = null;
+
+fn detectAudioPlayer() void {
+    for (&players) |*player| {
+        const paths = [_][]const u8{
+            "/usr/bin/", "/usr/local/bin/", "/bin/", "/usr/sbin/",
+        };
+        const cmd = std.mem.span(player.cmd);
+        for (paths) |dir| {
+            var buf: [256]u8 = undefined;
+            const full = std.fmt.bufPrintZ(&buf, "{s}{s}", .{ dir, cmd }) catch continue;
+            posix.access(full, posix.F_OK) catch continue;
+            audio_player = player;
+            return;
+        }
+    }
+}
+
+fn playWav(tmp_path: [*:0]const u8) void {
+    const player = audio_player orelse return;
+
+    const pid = posix.fork() catch return;
+    if (pid == 0) {
+        const pid2 = posix.fork() catch {
+            posix.exit(1);
+        };
+
+        if (pid2 == 0) {
+            var argv: [16:null]?[*:0]const u8 = [_:null]?[*:0]const u8{null} ** 16;
+            for (player.args, 0..) |arg, i| argv[i] = arg;
+            argv[player.args.len] = tmp_path;
+
+            _ = posix.execvpeZ(player.cmd, &argv, environ) catch {};
+            posix.exit(1);
+        }
+        posix.exit(0);
+    }
+    _ = posix.waitpid(pid, 0);
+}
 
 fn playBeep() void {
     const tmp = "/tmp/SnakeEat.wav";
@@ -11,15 +69,7 @@ fn playBeep() void {
         return;
     };
     file.close();
-
-    const pid = posix.fork() catch return;
-    if (pid == 0) {
-        const argv = [_:null]?[*:0]const u8{
-            "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp, null,
-        };
-        _ = posix.execvpeZ("ffplay", &argv, &[_:null]?[*:0]const u8{null}) catch {};
-        posix.exit(1);
-    }
+    playWav(tmp);
 }
 
 const Point = struct {
@@ -90,7 +140,7 @@ const Game = struct {
     flash_frames: u8 = 0,
     bonus_food: ?BonusFood = null,
     buff_ticks: u32 = 0,
-    speed_buff: i32 = 0,
+    speed_buff: i32 = 0, // ms delta: negative = faster, positive = slower
     walls: std.ArrayListUnmanaged(Point) = .{},
     level: u32 = 1,
     rng: std.Random,
@@ -160,6 +210,7 @@ const Game = struct {
     }
 
     fn spawnBonusFood(self: *Game) void {
+        // 50% chance to spawn a bonus food when normal food is eaten
         if (self.rng.intRangeLessThan(u8, 0, 2) == 0) return;
         const kind: FoodKind = if (self.rng.intRangeLessThan(u8, 0, 2) == 0) .fast else .slow;
         var attempts: u32 = 0;
@@ -189,17 +240,20 @@ const Game = struct {
         const segments = 2;
         var s: u32 = 0;
         while (s < segments) : (s += 1) {
+            // pick a random start point away from center
             var attempts: u32 = 0;
             while (attempts < 100) : (attempts += 1) {
                 const start = Point{
                     .x = self.rng.intRangeLessThan(i32, 2, self.width - 2),
                     .y = self.rng.intRangeLessThan(i32, 2, self.height - 2),
                 };
+                // avoid center spawn area
                 const cx = @divTrunc(self.width, 2);
                 const cy = @divTrunc(self.height, 2);
                 if (@abs(start.x - cx) < 5 and @abs(start.y - cy) < 3) continue;
                 if (self.isWall(start)) continue;
 
+                // horizontal or vertical segment of length 3-4
                 const horizontal = self.rng.intRangeLessThan(u8, 0, 2) == 0;
                 const length = self.rng.intRangeLessThan(i32, 3, 5);
                 var j: i32 = 0;
@@ -257,20 +311,24 @@ const Game = struct {
         sn.* = .{ .pos = next_pos };
         self.snake.prepend(&sn.node);
 
+        // tick buff
         if (self.buff_ticks > 0) {
             self.buff_ticks -= 1;
             if (self.buff_ticks == 0) self.speed_buff = 0;
         }
 
+        // tick sparks
         for (&self.sparks) |*spark| {
             if (spark.life > 0) spark.life -= 1;
         }
 
+        // check bonus food
         if (self.bonus_food) |bf| {
             if (next_pos.eq(bf.pos)) {
                 self.bonus_food = null;
                 self.score += 5;
                 self.snake_len += 1;
+                // buff lasts 5 seconds worth of ticks (~180ms base = ~28 ticks)
                 self.buff_ticks = 28;
                 self.speed_buff = if (bf.kind == .fast) -30 else 40;
                 self.spawnSparks(next_pos);
@@ -291,6 +349,7 @@ const Game = struct {
                 }
             }
 
+            // level up every 50 points, spawn new walls
             const new_level = (self.score / 50) + 1;
             if (new_level > self.level) {
                 self.level = new_level;
@@ -331,11 +390,13 @@ const Game = struct {
 
         self.grid[@as(usize, @intCast(self.food.y * self.width + self.food.x))] = .{ .char = '@', .color = .{ 255, 0, 100 } };
 
+        // draw walls
         for (self.walls.items) |wp| {
             const idx = @as(usize, @intCast(wp.y * self.width + wp.x));
             self.grid[idx] = .{ .char = '#', .color = .{ 160, 160, 160 } };
         }
 
+        // draw bonus food
         if (self.bonus_food) |bf| {
             const idx = @as(usize, @intCast(bf.pos.y * self.width + bf.pos.x));
             const color: [3]u8 = if (bf.kind == .fast) .{ 255, 60, 60 } else .{ 60, 60, 255 };
@@ -422,6 +483,8 @@ fn screenShake(w: anytype) !void {
 }
 
 pub fn main() !void {
+    detectAudioPlayer();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -473,6 +536,43 @@ pub fn main() !void {
     var game = try Game.init(allocator, 40, 20, prng.random());
     defer game.deinit();
     game.theme = selected_theme;
+
+    while (game.is_running) {
+        var buf: [1]u8 = undefined;
+        const n = try posix.read(posix.STDIN_FILENO, &buf);
+        if (n > 0) {
+            switch (buf[0]) {
+                'q' => break,
+                'w' => if (game.dir != .down) {
+                    game.dir = .up;
+                },
+                's' => if (game.dir != .up) {
+                    game.dir = .down;
+                },
+                'a' => if (game.dir != .right) {
+                    game.dir = .left;
+                },
+                'd' => if (game.dir != .left) {
+                    game.dir = .right;
+                },
+                else => {},
+            }
+        }
+
+        const ate_food = try game.update();
+        if (ate_food) playBeep();
+        try game.render(w);
+        try w.flush();
+
+        const base: i64 = 180 - @as(i64, @intCast(@min(game.score, 120)));
+        const sleep_ms = @as(u64, @intCast(@max(30, base + game.speed_buff)));
+        std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
+    }
+
+    try screenShake(w);
+    try w.print("\x1b[2J\x1b[HGAME OVER! Final Score: {d}\n", .{game.score});
+    try w.flush();
+    std.Thread.sleep(2 * std.time.ns_per_s);
 
     while (game.is_running) {
         var buf: [1]u8 = undefined;
