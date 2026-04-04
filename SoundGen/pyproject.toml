@@ -1,0 +1,7 @@
+[project]
+name = "soundgen"
+version = "0.1.0"
+description = "Script to generate the sounds for the games"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []

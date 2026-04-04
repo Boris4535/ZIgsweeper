@@ -1,0 +1,4 @@
+So, the sound files are glued to the binary already, but if one wishes to
+work on the sounds,they just need to run the main.py to generate the audio files
+
+and / or do their own tweaks

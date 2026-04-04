@@ -1,0 +1,6 @@
+copy and paste this in the terminal forlinux version
+(or download the release)
+
+of course, for minesweeper and others... its the fileName.zig
+
+zig build-exe Snake.zig -O ReleaseSafe -target x86_64-linux-musl

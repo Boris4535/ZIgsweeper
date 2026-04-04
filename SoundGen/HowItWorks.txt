@@ -1,0 +1,38 @@
+Very basic theory around sound and sound waves.
+(explained in the most poor terms possible)
+For those who dont know, sound travels at certain frequencies, and the vibration you have in the air, 
+works the same as the "frequecy" of the elctricity in your computer.
+So, the waves are the same.
+
+therefore, when you think about "compressing" a soundwave in the air, the principle is the same with electricity. 
+(that is, if one was savy enough, and used a rotating stick to use as output for an electric sound signal, theyd fundamentally have a speaker.)
+
+Now, if you skipped your trigonometry classes, then its a good time to read at em again, since the waves can be graphed. as waves
+which means, trigonometry and goniometry and other -metriy's (im sure there are gonna be math and physics majors who can contribute to this document better than i do).
+
+
+Sound Generation Functions
+generate_beep() — a rising chirp
+
+Linearly interpolates freq from 440 Hz → 880 Hz over 0.1 seconds
+Computes a sine wave at each moment: sin(2π × freq × t)
+Applies a square wave simplification: the sine only determines the sign (+32767 or -32767), making it a harsh buzzer rather than a smooth tone
+Multiplies by a linear fade-out envelope (1 - t) so it dies away
+
+generate_explosion() — a boom
+
+Uses white noise: random.uniform(-1, 1) gives completely random samples, which sounds like static/hiss
+Applies an exponential decay envelope e^(-5t) — loud at first, then drops off fast, mimicking an explosion fading
+
+generate_crunch() — a short impact
+
+Also white noise, but only 0.05 seconds long
+Uses a quadratic decay (1-t)² which falls off sharper than linear, giving a punchy click
+
+
+its all saved as wav as its the purest and rawest i could do.
+And, because we dont have hardware limitations, 
+bu, this goes beyond the scope of the program.
+
+Id use a drawing to explain this, but i will do when im not as lazy.
+Feel free to contribute tho.

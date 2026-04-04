@@ -1,6 +1,49 @@
 const std = @import("std");
 const posix = std.posix;
 
+const explosion_wav = @embedFile("SoundGen/explosion.wav");
+const flag_wav = @embedFile("SoundGen/flag.wav");
+
+fn playExplosion() void {
+    const tmp = "/tmp/MineExplosion.wav";
+    const file = std.fs.createFileAbsolute(tmp, .{}) catch return;
+
+    file.writeAll(explosion_wav) catch {
+        file.close();
+        return;
+    };
+    file.close();
+
+    const pid = posix.fork() catch return;
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{
+            "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp, null,
+        };
+        _ = posix.execvpeZ("ffplay", &argv, &[_:null]?[*:0]const u8{null}) catch {};
+        posix.exit(1);
+    }
+}
+
+fn playFlag() void {
+    const tmp = "/tmp/MineFlag.wav";
+    const file = std.fs.createFileAbsolute(tmp, .{}) catch return;
+
+    file.writeAll(flag_wav) catch {
+        file.close();
+        return;
+    };
+    file.close();
+
+    const pid = posix.fork() catch return;
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{
+            "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp, null,
+        };
+        _ = posix.execvpeZ("ffplay", &argv, &[_:null]?[*:0]const u8{null}) catch {};
+        posix.exit(1);
+    }
+}
+
 const Color = struct {
     pub const Reset = "\x1b[0m";
     pub const Red = "\x1b[31m";
@@ -262,7 +305,7 @@ pub fn main() !void {
                     try w.writeAll("? ");
                 }
 
-                if (is_cursor) try w.writeAll("\x1b[27m"); // Rimuovi inversione
+                if (is_cursor) try w.writeAll("\x1b[27m");
             }
             try w.writeAll("\n");
         }
@@ -285,11 +328,16 @@ pub fn main() !void {
             'l' => if (game.cursor_x < game.width - 1) {
                 game.cursor_x += 1;
             },
-            ' ' => game.reveal(game.cursor_x, game.cursor_y),
+            ' ' => {
+                const prev_state = game.state;
+                game.reveal(game.cursor_x, game.cursor_y);
+                if (game.state == .lost and prev_state == .playing) playExplosion();
+            },
             'f' => {
                 const idx = game.getIndex(game.cursor_x, game.cursor_y);
                 if (!game.cells[idx].revealed) {
                     game.cells[idx].flagged = !game.cells[idx].flagged;
+                    playFlag();
                 }
             },
             else => {},
