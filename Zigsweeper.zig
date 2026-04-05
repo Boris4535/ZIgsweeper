@@ -126,6 +126,25 @@ const Cell = packed struct(u8) {
 };
 
 const GameState = enum { playing, won, lost };
+const FaceState = enum { smile, startled, dead, cool };
+
+fn getTermSize() struct { cols: u32, rows: u32 } {
+    const linux = std.os.linux;
+    var ws: posix.winsize = undefined;
+    const rc = linux.ioctl(posix.STDOUT_FILENO, linux.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (rc == 0 and ws.col > 0 and ws.row > 0) {
+        return .{ .cols = ws.col, .rows = ws.row };
+    }
+    return .{ .cols = 80, .rows = 24 };
+}
+
+fn countFlags(game: *const Game) u32 {
+    var n: u32 = 0;
+    for (game.cells) |c| if (c.flagged) {
+        n += 1;
+    };
+    return n;
+}
 
 const Game = struct {
     width: u32,
@@ -135,6 +154,8 @@ const Game = struct {
     cursor_x: u32 = 0,
     cursor_y: u32 = 0,
     state: GameState = .playing,
+    face: FaceState = .smile,
+    start_time: i64 = 0,
     first_move: bool = true,
     allocator: std.mem.Allocator,
 
@@ -278,13 +299,17 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
     const w = &stdout_writer.interface;
 
-    try w.print("\x1b[2J\x1b[H", .{});
-    try w.print("{s}=== ZIGSWEEPER ==={s}\n\n", .{ Color.Cyan, Color.Reset });
-    try w.print("Choose mode':\n", .{});
-    try w.print("{s}1.{s} Easy (10x10, 10 mines)\n", .{ Color.Green, Color.Reset });
-    try w.print("{s}2.{s} Hard (20x15, 40 mines)\n", .{ Color.Yellow, Color.Reset });
-    try w.print("{s}3.{s} Extreme (30x16, 99 mines)\n", .{ Color.Red, Color.Reset });
-    try w.print("\nPress 1, 2, 3 or Q to get out.\n", .{});
+    const menu_ts = getTermSize();
+    const menu_col = if (menu_ts.cols > 40) (menu_ts.cols - 40) / 2 else 1;
+    const menu_row = if (menu_ts.rows > 10) (menu_ts.rows - 10) / 2 else 1;
+
+    try w.print("\x1b[2J", .{});
+    try w.print("\x1b[{d};{d}H{s}=== ZIGSWEEPER ==={s}", .{ menu_row, menu_col, Color.Cyan, Color.Reset });
+    try w.print("\x1b[{d};{d}HChoose difficulty:", .{ menu_row + 2, menu_col });
+    try w.print("\x1b[{d};{d}H{s}1.{s} Easy    (10x10, 10 mines)", .{ menu_row + 4, menu_col, Color.Green, Color.Reset });
+    try w.print("\x1b[{d};{d}H{s}2.{s} Hard    (20x15, 40 mines)", .{ menu_row + 5, menu_col, Color.Yellow, Color.Reset });
+    try w.print("\x1b[{d};{d}H{s}3.{s} Extreme (30x16, 99 mines)", .{ menu_row + 6, menu_col, Color.Red, Color.Reset });
+    try w.print("\x1b[{d};{d}HPress 1, 2, 3 or Q to quit.", .{ menu_row + 8, menu_col });
     try w.flush();
 
     var diff: Difficulty = .easy;
@@ -315,40 +340,93 @@ pub fn main() !void {
     defer game.deinit();
 
     while (game.state == .playing) {
-        try w.print("\x1b[2J\x1b[H", .{});
-        try w.print("ZigSweeper - HJKL: MOVE | SPACEBAR: Uncover | F: Flag | Q: Exit \n\n", .{});
+        const ts = getTermSize();
+        const board_w = game.width * 2 + 2;
+        const board_h = game.height + 5;
+        const col_off = if (ts.cols > board_w) (ts.cols - board_w) / 2 else 0;
+        const row_off = if (ts.rows > board_h) (ts.rows - board_h) / 2 else 0;
+
+        try w.print("\x1b[2J", .{});
+
+        const flags_placed = countFlags(&game);
+        const mines_left: i32 = @as(i32, @intCast(game.mine_count)) - @as(i32, @intCast(flags_placed));
+        const elapsed = if (game.start_time > 0) @divTrunc(std.time.milliTimestamp() - game.start_time, 1000) else 0;
+        const face_str = switch (game.face) {
+            .smile => ":-)",
+            .startled => ":-O",
+            .dead => "X-(",
+            .cool => "B-)",
+        };
+        try w.print("\x1b[{d};{d}H", .{ row_off + 1, col_off + 1 });
+        try w.print("{s}+", .{Color.DarkGray});
+        var bi: u32 = 0;
+        while (bi < board_w - 2) : (bi += 1) try w.writeAll("-");
+        try w.print("+{s}", .{Color.Reset});
+
+        try w.print("\x1b[{d};{d}H", .{ row_off + 2, col_off + 1 });
+        try w.print("{s}|{s}", .{ Color.DarkGray, Color.Reset });
+        try w.print(" {s}{d:0>3}{s}", .{ Color.BrightRed, @max(mines_left, 0), Color.Reset });
+        const inner = board_w - 2;
+        const pad_total = if (inner > 9) inner - 9 else 0; // "000" + "   " + face + "   " + "000" = 3+3+3+3+3=15... simpler:
+        const left_pad = pad_total / 2;
+        const right_pad = pad_total - left_pad;
+        var p: u32 = 0;
+        while (p < left_pad) : (p += 1) try w.writeByte(' ');
+        try w.print("{s}{s}{s}", .{ Color.Yellow, face_str, Color.Reset });
+        p = 0;
+        while (p < right_pad) : (p += 1) try w.writeByte(' ');
+        try w.print(" {s}{d:0>3}{s}", .{ Color.Green, @min(elapsed, 999), Color.Reset });
+        try w.print("{s}|{s}", .{ Color.DarkGray, Color.Reset });
+
+        try w.print("\x1b[{d};{d}H", .{ row_off + 3, col_off + 1 });
+        try w.print("{s}+", .{Color.DarkGray});
+        bi = 0;
+        while (bi < board_w - 2) : (bi += 1) try w.writeAll("-");
+        try w.print("+{s}", .{Color.Reset});
 
         for (0..game.height) |y| {
+            try w.print("\x1b[{d};{d}H", .{ row_off + 4 + y, col_off + 1 });
+            try w.print("{s}|{s}", .{ Color.DarkGray, Color.Reset });
             for (0..game.width) |x| {
                 const is_cursor = (x == game.cursor_x and y == game.cursor_y);
                 const cell = game.cells[game.getIndex(@intCast(x), @intCast(y))];
-
-                if (is_cursor) try w.writeAll("\x1b[7m"); // Inverti colori per il cursore
-
+                if (is_cursor) try w.writeAll("\x1b[7m");
                 if (cell.revealed) {
                     if (cell.mine) {
                         try w.print("{s}* {s}", .{ Color.BrightRed, Color.Reset });
                     } else if (cell.neighbor_mines == 0) {
-                        try w.print("{s}. {s}", .{ Color.DarkGray, Color.Reset });
+                        try w.print("{s}  {s}", .{ Color.DarkGray, Color.Reset });
                     } else {
-                        const num_color = Color.getNumberColor(cell.neighbor_mines);
-                        try w.print("{s}{d} {s}", .{ num_color, cell.neighbor_mines, Color.Reset });
+                        const nc = Color.getNumberColor(cell.neighbor_mines);
+                        try w.print("{s}{d} {s}", .{ nc, cell.neighbor_mines, Color.Reset });
                     }
                 } else if (cell.flagged) {
-                    try w.print("{s}F {s}", .{ Color.Yellow, Color.Reset });
+                    try w.print("{s}! {s}", .{ Color.Yellow, Color.Reset });
                 } else {
-                    try w.writeAll("? ");
+                    try w.print("{s}# {s}", .{ Color.DarkGray, Color.Reset });
                 }
-
                 if (is_cursor) try w.writeAll("\x1b[27m");
             }
-            try w.writeAll("\n");
+            try w.print("{s}|{s}", .{ Color.DarkGray, Color.Reset });
         }
+
+        try w.print("\x1b[{d};{d}H", .{ row_off + 4 + game.height, col_off + 1 });
+        try w.print("{s}+", .{Color.DarkGray});
+        bi = 0;
+        while (bi < board_w - 2) : (bi += 1) try w.writeAll("-");
+        try w.print("+{s}", .{Color.Reset});
+
+        try w.print("\x1b[{d};{d}H", .{ row_off + 5 + game.height, col_off + 1 });
+        try w.print("{s}HJKL{s}:move  {s}SPC{s}:dig  {s}F{s}:flag  {s}Q{s}:quit", .{ Color.Cyan, Color.Reset, Color.Cyan, Color.Reset, Color.Cyan, Color.Reset, Color.Cyan, Color.Reset });
+
         try w.flush();
 
         var key_buf: [1]u8 = undefined;
         const bytes_read = try posix.read(posix.STDIN_FILENO, &key_buf);
         if (bytes_read == 0) continue;
+
+        if (game.face == .startled) game.face = .smile;
+
         switch (key_buf[0]) {
             'q' => break,
             'k' => if (game.cursor_y > 0) {
@@ -364,14 +442,21 @@ pub fn main() !void {
                 game.cursor_x += 1;
             },
             ' ' => {
+                if (game.first_move) game.start_time = std.time.milliTimestamp();
                 const prev_state = game.state;
                 game.reveal(game.cursor_x, game.cursor_y);
-                if (game.state == .lost and prev_state == .playing) playExplosion();
+                if (game.state == .lost and prev_state == .playing) {
+                    game.face = .dead;
+                    playExplosion();
+                } else if (game.state == .won) {
+                    game.face = .cool;
+                }
             },
             'f' => {
                 const idx = game.getIndex(game.cursor_x, game.cursor_y);
                 if (!game.cells[idx].revealed) {
                     game.cells[idx].flagged = !game.cells[idx].flagged;
+                    game.face = .startled;
                     playFlag();
                 }
             },
@@ -379,11 +464,18 @@ pub fn main() !void {
         }
     }
 
-    try w.print("\x1b[2J\x1b[H", .{});
+    const ts = getTermSize();
+    const board_w = game.width * 2 + 2;
+    const board_h = game.height + 5;
+    const col_off = if (ts.cols > board_w) (ts.cols - board_w) / 2 else 0;
+    const row_off = if (ts.rows > board_h) (ts.rows - board_h) / 2 else 0;
+
+    try w.print("\x1b[2J", .{});
+    try w.print("\x1b[{d};{d}H", .{ row_off + 1, col_off + 1 });
     if (game.state == .won) {
-        try w.print("{s}YOU WON!{s}\n", .{ Color.Green, Color.Reset });
+        try w.print("{s}B-)  YOU WIN!  B-){s}", .{ Color.Green, Color.Reset });
     } else if (game.state == .lost) {
-        try w.print("{s}BOOOOM !{s}\n", .{ Color.BrightRed, Color.Reset });
+        try w.print("{s}X-(  BOOM!  X-({s}", .{ Color.BrightRed, Color.Reset });
     }
     try w.flush();
     std.Thread.sleep(2 * std.time.ns_per_s);

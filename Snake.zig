@@ -5,7 +5,6 @@ extern var environ: [*:null]?[*:0]u8;
 
 const beep_wav = @embedFile("SoundGen/eat.wav");
 
-// Each entry: { command, args... } — must be null-sentinel terminated
 const AudioPlayer = struct {
     cmd: [*:0]const u8,
     args: []const [*:0]const u8,
@@ -20,7 +19,6 @@ const players = [_]AudioPlayer{
     .{ .cmd = "sox", .args = &.{ "play", "-q" } },
 };
 
-// Detected at startup, null = no player found
 var audio_player: ?*const AudioPlayer = null;
 
 fn detectAudioPlayer() void {
@@ -116,10 +114,41 @@ const Theme = enum {
     }
 };
 
-const Cell = struct {
-    char: u8 = ' ',
-    color: ?[3]u8 = null,
+const Pixel = struct {
+    r: u8 = 0,
+    g: u8 = 0,
+    b: u8 = 0,
+    empty: bool = true,
 };
+
+fn getTermSize() struct { cols: u32, rows: u32 } {
+    const linux = std.os.linux;
+    var ws: posix.winsize = undefined;
+    const rc = linux.ioctl(posix.STDOUT_FILENO, linux.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (rc == 0 and ws.col > 0 and ws.row > 0)
+        return .{ .cols = ws.col, .rows = ws.row };
+    return .{ .cols = 80, .rows = 24 };
+}
+
+fn egyptSide(i: u32) []const u8 {
+    return switch (i % 6) {
+        0 => "|\xc3\xb8|",
+        1 => "|^|",
+        2 => "|~|",
+        3 => "|\xc3\xb8|",
+        4 => "|+|",
+        5 => "|*|",
+        else => "|||",
+    };
+}
+
+fn egyptTop(i: u32) []const u8 {
+    return switch (i % 8) {
+        0, 4 => "*",
+        2, 6 => "^",
+        else => "-",
+    };
+}
 
 const Spark = struct {
     pos: Point,
@@ -135,7 +164,7 @@ const Game = struct {
     food: Point,
     score: u32 = 0,
     theme: Theme = .neon_green,
-    grid: []Cell,
+    grid: []Pixel,
     sparks: [4]Spark = [_]Spark{.{ .pos = .{ .x = 0, .y = 0 }, .life = 0 }} ** 4,
     flash_frames: u8 = 0,
     bonus_food: ?BonusFood = null,
@@ -148,7 +177,7 @@ const Game = struct {
     is_running: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, w: i32, h: i32, random: std.Random) !Game {
-        const grid = try allocator.alloc(Cell, @as(usize, @intCast(w * h)));
+        const grid = try allocator.alloc(Pixel, @as(usize, @intCast(w * h)));
         var self = Game{
             .width = w,
             .height = h,
@@ -210,7 +239,6 @@ const Game = struct {
     }
 
     fn spawnBonusFood(self: *Game) void {
-        // 50% chance to spawn a bonus food when normal food is eaten
         if (self.rng.intRangeLessThan(u8, 0, 2) == 0) return;
         const kind: FoodKind = if (self.rng.intRangeLessThan(u8, 0, 2) == 0) .fast else .slow;
         var attempts: u32 = 0;
@@ -240,20 +268,17 @@ const Game = struct {
         const segments = 2;
         var s: u32 = 0;
         while (s < segments) : (s += 1) {
-            // pick a random start point away from center
             var attempts: u32 = 0;
             while (attempts < 100) : (attempts += 1) {
                 const start = Point{
                     .x = self.rng.intRangeLessThan(i32, 2, self.width - 2),
                     .y = self.rng.intRangeLessThan(i32, 2, self.height - 2),
                 };
-                // avoid center spawn area
                 const cx = @divTrunc(self.width, 2);
                 const cy = @divTrunc(self.height, 2);
                 if (@abs(start.x - cx) < 5 and @abs(start.y - cy) < 3) continue;
                 if (self.isWall(start)) continue;
 
-                // horizontal or vertical segment of length 3-4
                 const horizontal = self.rng.intRangeLessThan(u8, 0, 2) == 0;
                 const length = self.rng.intRangeLessThan(i32, 3, 5);
                 var j: i32 = 0;
@@ -293,7 +318,6 @@ const Game = struct {
             return false;
         }
 
-        // wall collision
         if (self.isWall(next_pos)) {
             self.is_running = false;
             return false;
@@ -311,24 +335,20 @@ const Game = struct {
         sn.* = .{ .pos = next_pos };
         self.snake.prepend(&sn.node);
 
-        // tick buff
         if (self.buff_ticks > 0) {
             self.buff_ticks -= 1;
             if (self.buff_ticks == 0) self.speed_buff = 0;
         }
 
-        // tick sparks
         for (&self.sparks) |*spark| {
             if (spark.life > 0) spark.life -= 1;
         }
 
-        // check bonus food
         if (self.bonus_food) |bf| {
             if (next_pos.eq(bf.pos)) {
                 self.bonus_food = null;
                 self.score += 5;
                 self.snake_len += 1;
-                // buff lasts 5 seconds worth of ticks (~180ms base = ~28 ticks)
                 self.buff_ticks = 28;
                 self.speed_buff = if (bf.kind == .fast) -30 else 40;
                 self.spawnSparks(next_pos);
@@ -349,7 +369,6 @@ const Game = struct {
                 }
             }
 
-            // level up every 50 points, spawn new walls
             const new_level = (self.score / 50) + 1;
             if (new_level > self.level) {
                 self.level = new_level;
@@ -369,74 +388,109 @@ const Game = struct {
     }
 
     pub fn render(self: *Game, w: anytype) !void {
-        try w.print("\x1b[2J\x1b[H", .{});
+        const ts = getTermSize();
+        const gw: u32 = @intCast(self.width);
+        const gh: u32 = @intCast(self.height);
+        const term_rows = gh / 2;
+        const box_w = gw + 6;
+        const box_h = term_rows + 6;
+        const col_off = if (ts.cols > box_w) (ts.cols - box_w) / 2 else 0;
+        const row_off = if (ts.rows > box_h) (ts.rows - box_h) / 2 else 0;
 
+        try w.print("\x1b[{d};{d}H\x1b[2K", .{ row_off + 1, col_off + 1 });
         if (self.flash_frames > 0) {
-            try w.print("\x1b[7m Score: {d}  Level: {d} \x1b[0m\n", .{ self.score, self.level });
+            try w.print("\x1b[7m Scr:{d:>4}  Lvl:{d}  \x1b[0m", .{ self.score, self.level });
             self.flash_frames -= 1;
         } else {
-            try w.print("Score: {d}  Level: {d}", .{ self.score, self.level });
+            try w.print("\x1b[38;2;255;215;0mScr:\x1b[1m{d:>4}\x1b[0m  \x1b[38;2;180;180;255mLvl:{d}\x1b[0m", .{ self.score, self.level });
             if (self.buff_ticks > 0) {
                 if (self.speed_buff < 0) {
-                    try w.print("  \x1b[38;2;255;80;80mFAST!\x1b[0m ({d})", .{self.buff_ticks});
+                    try w.print("  \x1b[38;2;255;80;80mFAST!({d})\x1b[0m", .{self.buff_ticks});
                 } else {
-                    try w.print("  \x1b[38;2;80;80;255mSLOW!\x1b[0m ({d})", .{self.buff_ticks});
+                    try w.print("  \x1b[38;2;80;130;255mSLOW!({d})\x1b[0m", .{self.buff_ticks});
                 }
             }
-            try w.writeByte('\n');
         }
 
         @memset(self.grid, .{});
 
-        self.grid[@as(usize, @intCast(self.food.y * self.width + self.food.x))] = .{ .char = '@', .color = .{ 255, 0, 100 } };
-
-        // draw walls
-        for (self.walls.items) |wp| {
-            const idx = @as(usize, @intCast(wp.y * self.width + wp.x));
-            self.grid[idx] = .{ .char = '#', .color = .{ 160, 160, 160 } };
+        for (0..gw) |gx| {
+            const shade: u8 = if (gx % 3 == 0) @as(u8, 100) else if (gx % 3 == 1) @as(u8, 120) else @as(u8, 80);
+            const g1 = (@as(u32, @intCast(self.height)) - 2) * gw + @as(u32, @intCast(gx));
+            const g2 = (@as(u32, @intCast(self.height)) - 1) * gw + @as(u32, @intCast(gx));
+            self.grid[g1] = .{ .r = 20, .g = shade, .b = 20, .empty = false };
+            self.grid[g2] = .{ .r = 10, .g = @intCast(@as(u32, shade) * 6 / 10), .b = 10, .empty = false };
         }
 
-        // draw bonus food
+        self.grid[@intCast(self.food.y * self.width + self.food.x)] = .{ .r = 255, .g = 50, .b = 180, .empty = false };
+
+        for (self.walls.items) |wp| {
+            self.grid[@intCast(wp.y * self.width + wp.x)] = .{ .r = 190, .g = 160, .b = 90, .empty = false };
+        }
+
         if (self.bonus_food) |bf| {
-            const idx = @as(usize, @intCast(bf.pos.y * self.width + bf.pos.x));
-            const color: [3]u8 = if (bf.kind == .fast) .{ 255, 60, 60 } else .{ 60, 60, 255 };
-            self.grid[idx] = .{ .char = '$', .color = color };
+            const idx: usize = @intCast(bf.pos.y * self.width + bf.pos.x);
+            self.grid[idx] = if (bf.kind == .fast)
+                .{ .r = 255, .g = 60, .b = 60, .empty = false }
+            else
+                .{ .r = 60, .g = 100, .b = 255, .empty = false };
         }
 
         for (self.sparks) |spark| {
             if (spark.life == 0) continue;
-            const idx = @as(usize, @intCast(spark.pos.y * self.width + spark.pos.x));
-            const char: u8 = if (spark.life == 2) '*' else '.';
-            self.grid[idx] = .{ .char = char, .color = .{ 255, 200, 50 } };
+            const idx: usize = @intCast(spark.pos.y * self.width + spark.pos.x);
+            const bright: u8 = if (spark.life == 2) 255 else 140;
+            self.grid[idx] = .{ .r = bright, .g = @intCast(@as(u32, bright) * 3 / 4), .b = 0, .empty = false };
         }
 
         var curr = self.snake.first;
-        var i: usize = 0;
-        while (curr) |n| : (curr = n.next) {
-            const sn = SnakeNode.fromNode(n);
-            const color = self.theme.getRgb(i, self.snake_len);
-
-            const char: u8 = if (i == 0) 'O' else if (i == self.snake_len - 1) '.' else 'o';
-
-            const idx = @as(usize, @intCast(sn.pos.y * self.width + sn.pos.x));
-            self.grid[idx] = .{ .char = char, .color = color };
-            i += 1;
+        var si: usize = 0;
+        while (curr) |sn_node| : (curr = sn_node.next) {
+            const sn = SnakeNode.fromNode(sn_node);
+            const c = self.theme.getRgb(si, self.snake_len);
+            self.grid[@intCast(sn.pos.y * self.width + sn.pos.x)] = .{ .r = c[0], .g = c[1], .b = c[2], .empty = false };
+            si += 1;
         }
 
-        try w.writeAll("+" ++ ("-" ** 40) ++ "+\n");
-        for (0..@intCast(self.height)) |y| {
-            try w.writeAll("|");
-            for (0..@intCast(self.width)) |x| {
-                const cell = self.grid[y * @as(usize, @intCast(self.width)) + x];
-                if (cell.color) |c| {
-                    try w.print("\x1b[38;2;{d};{d};{d}m{c}\x1b[0m", .{ c[0], c[1], c[2], cell.char });
-                } else {
-                    try w.writeByte(cell.char);
-                }
+        try w.print("\x1b[{d};{d}H\x1b[38;2;218;165;32m*=", .{ row_off + 2, col_off + 1 });
+        var ti: u32 = 0;
+        while (ti < gw) : (ti += 1) try w.writeAll(egyptTop(ti));
+        try w.writeAll("=*\x1b[0m");
+
+        try w.print("\x1b[{d};{d}H\x1b[38;2;218;165;32m||\x1b[38;2;120;90;40m\x1b[49m", .{ row_off + 3, col_off + 1 });
+        ti = 0;
+        while (ti < gw) : (ti += 1) try w.writeAll("\xe2\x96\x84"); // ▄
+        try w.print("\x1b[0m\x1b[38;2;218;165;32m||\x1b[0m", .{});
+
+        var row: u32 = 0;
+        while (row < term_rows) : (row += 1) {
+            const top_y = row * 2;
+            const bot_y = row * 2 + 1;
+            try w.print("\x1b[{d};{d}H\x1b[38;2;218;165;32m{s}\x1b[0m", .{ row_off + 4 + row, col_off + 1, egyptSide(row) });
+
+            for (0..gw) |x| {
+                const top = self.grid[top_y * gw + x];
+                const bot = self.grid[bot_y * gw + x];
+                try w.print(
+                    "\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m\xe2\x96\x80\x1b[0m",
+                    .{ top.r, top.g, top.b, bot.r, bot.g, bot.b },
+                );
             }
-            try w.writeAll("|\n");
+            try w.print("\x1b[38;2;218;165;32m{s}\x1b[0m", .{egyptSide(row + 1)});
         }
-        try w.writeAll("+" ++ ("-" ** 40) ++ "+\n");
+
+        try w.print("\x1b[{d};{d}H\x1b[38;2;218;165;32m||\x1b[38;2;120;90;40m", .{ row_off + 4 + term_rows, col_off + 1 });
+        ti = 0;
+        while (ti < gw) : (ti += 1) try w.writeAll("\xe2\x96\x80"); // ▀
+        try w.print("\x1b[0m\x1b[38;2;218;165;32m||\x1b[0m", .{});
+
+        try w.print("\x1b[{d};{d}H\x1b[38;2;218;165;32m*=", .{ row_off + 5 + term_rows, col_off + 1 });
+        ti = 0;
+        while (ti < gw) : (ti += 1) try w.writeAll(egyptTop(ti + 4));
+        try w.writeAll("=*\x1b[0m");
+
+        // controls
+        try w.print("\x1b[{d};{d}H\x1b[38;2;100;100;100mWASD:move  Q:quit\x1b[0m", .{ row_off + 7 + term_rows, col_off + 4 });
     }
 
     pub fn deinit(self: *Game) void {
@@ -493,7 +547,7 @@ pub fn main() !void {
 
     const stdout_file = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    var bw_buf: [4096]u8 = undefined;
+    var bw_buf: [131072]u8 = undefined;
 
     var bw_impl = stdout_file.writer(&bw_buf);
     const bw = &bw_impl.interface;
@@ -536,43 +590,6 @@ pub fn main() !void {
     var game = try Game.init(allocator, 40, 20, prng.random());
     defer game.deinit();
     game.theme = selected_theme;
-
-    while (game.is_running) {
-        var buf: [1]u8 = undefined;
-        const n = try posix.read(posix.STDIN_FILENO, &buf);
-        if (n > 0) {
-            switch (buf[0]) {
-                'q' => break,
-                'w' => if (game.dir != .down) {
-                    game.dir = .up;
-                },
-                's' => if (game.dir != .up) {
-                    game.dir = .down;
-                },
-                'a' => if (game.dir != .right) {
-                    game.dir = .left;
-                },
-                'd' => if (game.dir != .left) {
-                    game.dir = .right;
-                },
-                else => {},
-            }
-        }
-
-        const ate_food = try game.update();
-        if (ate_food) playBeep();
-        try game.render(w);
-        try w.flush();
-
-        const base: i64 = 180 - @as(i64, @intCast(@min(game.score, 120)));
-        const sleep_ms = @as(u64, @intCast(@max(30, base + game.speed_buff)));
-        std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
-    }
-
-    try screenShake(w);
-    try w.print("\x1b[2J\x1b[HGAME OVER! Final Score: {d}\n", .{game.score});
-    try w.flush();
-    std.Thread.sleep(2 * std.time.ns_per_s);
 
     while (game.is_running) {
         var buf: [1]u8 = undefined;
